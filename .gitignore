@@ -95,5 +95,11 @@ ENV/
 # Rope project settings
 .ropeproject
 
+# Data
+*.png
+*.json
+*.ckpt.*
+checkpoint
+
 .gitignore
 .idea/

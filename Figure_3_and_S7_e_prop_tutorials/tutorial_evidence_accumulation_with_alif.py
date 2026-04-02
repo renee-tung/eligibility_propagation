@@ -3,12 +3,15 @@
 # Authors: G Bellec*, F Scherr*, A Subramoney, E Hajek, Darjan Salaj, R Legenstein, W Maass
 
 import datetime
+import json
+import os
 import socket
 from time import time
 import matplotlib.pyplot as plt
 import numpy as np
 import numpy.random as rd
-import tensorflow as tf
+# import tensorflow as tf
+import tensorflow.compat.v1 as tf
 from tools import update_plot, generate_click_task_data
 from models import EligALIF, exp_convolve
 
@@ -43,9 +46,23 @@ tf.app.flags.DEFINE_float('dampening_factor', 0.3, 'factor that controls amplitu
 # other settings
 tf.app.flags.DEFINE_bool('do_plot', True, 'Perform plots')
 tf.app.flags.DEFINE_bool('device_placement', False, '')
+tf.app.flags.DEFINE_bool('save_outputs', True, 'Save run outputs to disk')
+tf.app.flags.DEFINE_string('output_dir', 'results', 'Directory where run artifacts are saved')
 
 assert FLAGS.eprop_impl in ['autodiff', 'hardcoded']
 assert FLAGS.feedback in ['random', 'symmetric']
+
+
+def _json_default(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    raise TypeError('Object of type {} is not JSON serializable'.format(type(obj).__name__))
 
 # Experiment parameters
 t_cue_spacing = 150  # distance between two consecutive cues in ms
@@ -176,6 +193,7 @@ with tf.name_scope('OptimizationScheme'):
         # learning_signal_j(t) = sum_k B_kj (pi*_k(t) - pi_k(t))
         learning_signal_classification = tf.gradients(loss_cls, filtered_z)[0]
         learning_signal_regularization = tf.gradients(loss_reg_f, filtered_z)[0]
+        # import pdb; pdb.set_trace()
         learning_signal = learning_signal_classification + learning_signal_regularization
 
         # e-traces for input synapses
@@ -215,6 +233,8 @@ with tf.name_scope('OptimizationScheme'):
 
     with tf.control_dependencies(grad_error_prints + grad_error_assertions):
         train_step = opt.apply_gradients(grads_and_vars=grads_and_vars, global_step=global_step)
+
+saver = tf.train.Saver(var_list=var_list, max_to_keep=1)
 
 # create session
 sess = tf.Session(config=tf.ConfigProto(log_device_placement=FLAGS.device_placement))
@@ -388,5 +408,55 @@ for i in range(4):
 
 print('''Statistics on the test set average error {:.2g} +- {:.2g} (averaged over 16 test batches of size {})'''
       .format(np.mean(test_errors), np.std(test_errors), FLAGS.n_batch))
+
+if FLAGS.save_outputs:
+    eprop_tag = 'eprop_{}'.format('true' if FLAGS.eprop else 'false')
+    run_name = 'evidence_accumulation_{}_{}'.format(eprop_tag, start_time.strftime('%Y%m%d_%H%M%S'))
+    run_dir = os.path.join(FLAGS.output_dir, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    results['test_errors'] = test_errors
+    results['test_error_mean'] = float(np.mean(test_errors))
+    results['test_error_std'] = float(np.std(test_errors))
+
+    results_path = os.path.join(run_dir, 'results.json')
+    with open(results_path, 'w') as f:
+        json.dump(results, f, indent=2, default=_json_default)
+    print('Saved results JSON to {}'.format(results_path))
+
+    model_spec = {
+        'n_in': n_in,
+        'n_regular': n_regular,
+        'n_adaptive': n_adaptive,
+        'n_neurons': n_neurons,
+        'tau_v': FLAGS.tau_v,
+        'tau_out': FLAGS.tau_out,
+        'tau_a': FLAGS.tau_a,
+        'thr': FLAGS.thr,
+        'dt': FLAGS.dt,
+        'n_ref': FLAGS.n_ref,
+        'dampening_factor': FLAGS.dampening_factor,
+        'eprop': FLAGS.eprop,
+        'eprop_impl': FLAGS.eprop_impl,
+        'feedback': FLAGS.feedback,
+        'f_regularization_type': FLAGS.f_regularization_type,
+        't_cue_spacing': t_cue_spacing,
+        'input_f0': input_f0,
+        'reg_rate_hz': FLAGS.reg_rate,
+        'reg_f': FLAGS.reg_f,
+        'checkpoint_prefix': os.path.join(run_dir, 'model.ckpt'),
+    }
+    model_spec_path = os.path.join(run_dir, 'model_spec.json')
+    with open(model_spec_path, 'w') as f:
+        json.dump(model_spec, f, indent=2)
+    print('Saved model spec JSON to {}'.format(model_spec_path))
+
+    checkpoint_path = saver.save(sess, os.path.join(run_dir, 'model.ckpt'))
+    print('Saved model checkpoint to {}'.format(checkpoint_path))
+
+    if FLAGS.do_plot:
+        figure_path = os.path.join(run_dir, 'final_plot.png')
+        fig.savefig(figure_path, dpi=200, bbox_inches='tight')
+        print('Saved plot PNG to {}'.format(figure_path))
 
 del sess
