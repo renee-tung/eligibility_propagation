@@ -12,9 +12,8 @@ import numpy as np
 import numpy.random as rd
 # import tensorflow as tf
 import tensorflow.compat.v1 as tf
-from tools import update_plot, generate_click_task_data
+from tools import update_plot, generate_sternberg_task_data, generate_click_task_data
 from models import EligALIF, exp_convolve
-
 import pdb
 
 FLAGS = tf.app.flags.FLAGS
@@ -70,7 +69,7 @@ def _json_default(obj):
 t_cue_spacing = 150  # distance between two consecutive cues in ms
 
 # Frequencies
-input_f0 = 40. / 1000.  # poisson firing rate of input neurons in khz
+# input_f0 = 40. / 1000.  # poisson firing rate of input neurons in khz
 regularization_f0 = FLAGS.reg_rate / 1000.  # mean target network firing frequency
 
 # Network parameters
@@ -81,22 +80,47 @@ n_regular = 50
 n_neurons = n_adaptive + n_regular
 decay = np.exp(-FLAGS.dt / FLAGS.tau_out)  # output layer filtered_z decay, chose value between 15 and 30ms as for tau_v
 
-n_in = 40
+# n_in = 40
+n_in = 4 # 4 input channels
 
-def get_data_dict(batch_size):
+# settings
+settings = {
+        'T': 250, # trial duration (in steps)
+        'stim_on': 50, # input stim onset (in steps)
+        'stim_dur': 25, # input stim duration (in steps)
+        'delay': 200, # delay b/w sample and test (in steps)
+        # 'DeltaT': 1, # sampling rate
+        # 'taus': args.decay_taus, # decay time-constants (in steps)
+        # 'task': args.task.lower(), # task name
+        'load': 1, # initialize with load 1, but will alternate with 3
+        'p_low': 0.5, # probability of low load trial (load 1) vs high load trial (load 3)
+        'jitter_onset': 0,
+        'jitter_delay': 0,
+        }
+
+def get_data_dict(batch_size, settings):
+        
     # used for obtaining a new randomly generated batch of examples
-    seq_len = int(t_cue_spacing * 7 + 1200)
-    spk_data, in_nums, target_data, _ = \
-        generate_click_task_data(batch_size=batch_size, seq_len=seq_len, n_neuron=n_in, recall_duration=150,
-                                 p_group=0.3, t_cue=100, n_cues=7, t_interval=t_cue_spacing, f0=input_f0,
-                                 n_input_symbols=4)
-    return {input_spikes: spk_data, input_nums: in_nums, target_nums: target_data}
+    batch_inputs, batch_targets, batch_labels, batch_loads = generate_sternberg_task_data(batch_size=batch_size, settings=settings)
+    batch_inputs = np.transpose(batch_inputs, (0, 2, 1))  # (batch, T, channels)
+    return {inputs: batch_inputs, targets: batch_targets, labels: batch_labels, loads: batch_loads}
+
+    # seq_len = int(t_cue_spacing * 7 + 1200)
+    # spk_data, in_nums, target_data, _ = \
+    #     generate_click_task_data(batch_size=batch_size, seq_len=seq_len, n_neuron=n_in, recall_duration=150,
+    #                              p_group=0.3, t_cue=100, n_cues=7, t_interval=t_cue_spacing, f0=input_f0,
+    #                              n_input_symbols=4)
+    # return {input_spikes: spk_data, input_nums: in_nums, target_nums: target_data}
 
 
 # Generate input placeholders
-input_spikes = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None, n_in),name='InputSpikes')  # MAIN input spike placeholder
-input_nums = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None),name='InputSpikes')  # MAIN input spike placeholder
-target_nums = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch, None),name='TargetNums')  # Lists of target characters of the recall task
+inputs = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None, n_in), name='Inputs')  # MAIN input placeholder
+targets = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None), name='Targets')  # Target output placeholder
+labels = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch,), name='Labels') # Same/different label for each trial in batch
+loads = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch,), name='Loads') # Load (number of items to remember) for each trial in batch
+# input_spikes = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None, n_in),name='InputSpikes')  # MAIN input spike placeholder
+# input_nums = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None),name='InputSpikes')  # MAIN input spike placeholder
+# target_nums = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch, None),name='TargetNums')  # Lists of target characters of the recall task
 
 # build computational graph
 with tf.variable_scope('CellDefinition'):
@@ -111,13 +135,15 @@ with tf.variable_scope('CellDefinition'):
                     stop_z_gradients=FLAGS.eprop, n_refractory=FLAGS.n_ref)
 
 with tf.name_scope('SimulateNetwork'):
-    outputs, final_state = tf.nn.dynamic_rnn(cell, input_spikes, dtype=tf.float32)
+    # outputs, final_state = tf.nn.dynamic_rnn(cell, input_spikes, dtype=tf.float32)
+    outputs, final_state = tf.nn.dynamic_rnn(cell, inputs, dtype=tf.float32)
     # z - spikes, v - membrane potentials, b - threshold adaptation variables
     z, s = outputs
     v, b = s[..., 0], s[..., 1]
 
 with tf.name_scope('OutputComputation'):
-    W_out = tf.get_variable(name='out_weight', shape=[n_regular + n_adaptive, 2])
+    # W_out = tf.get_variable(name='out_weight', shape=[n_regular + n_adaptive, 2])
+    W_out = tf.get_variable(name='out_weight', shape=[n_regular + n_adaptive, 1]) # if target signal
     filtered_z = exp_convolve(z, decay)
 
     if FLAGS.eprop and FLAGS.feedback == 'random':
@@ -140,22 +166,63 @@ with tf.name_scope('OutputComputation'):
         out = matmul_random_feedback(filtered_z, W_out, B_out)
     else:
         out = tf.einsum('btj,jk->btk', filtered_z, W_out)
-    pdb.set_trace()
+
     # we only use network output at the end for classification
-    output_logits = out[:, -t_cue_spacing:]
+    # output_logits = out[:, -t_cue_spacing:]
 
 with tf.name_scope('TaskLoss'):
-    tiled_targets = tf.tile(target_nums[:, np.newaxis, -1], (1, t_cue_spacing))
-    loss_cls = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=tiled_targets,
-                                                                         logits=output_logits))
-    y_predict = tf.argmax(tf.reduce_mean(output_logits, axis=1), axis=1)
+    # target_window = tf.cast(targets[:, -t_cue_spacing:], tf.int32)
+    # target_signal = tf.one_hot(target_window, depth=2, dtype=tf.float32)
+    # output_signal = tf.nn.softmax(output_logits, axis=-1)
+    # loss_cls = tf.reduce_mean(tf.square(target_signal - output_signal))
+    # y_predict = tf.argmax(tf.reduce_mean(output_signal, axis=1), axis=1)
 
-    # Define the accuracy
-    accuracy = tf.reduce_mean(tf.cast(tf.equal(target_nums[:, -1], y_predict), dtype=tf.float32))
-    recall_errors = 1 - accuracy
+    # # Define the accuracy
+    # accuracy = tf.reduce_mean(tf.cast(tf.equal(tf.cast(targets[:, -1], tf.int64), y_predict), dtype=tf.float32))
+    # recall_errors = 1 - accuracy
 
+    # with tf.name_scope('PlotNodes'):
+    #     out_plot = tf.nn.softmax(out[:2], axis=-1)
+
+    out_2d = tf.squeeze(out, axis=-1)
+    loss_cls = tf.reduce_mean(tf.square(targets - out_2d))
+    
+    T = tf.shape(out_2d, out_type=tf.int64)[1]
+    batch_size = tf.shape(out_2d)[0]
+    
+    time_idx = tf.range(T)[None, :] # Create time indices: shape (1, T)
+    resp_onsets = (settings['stim_on'] + loads * settings['stim_dur'] + \
+        settings['stim_dur'] + settings['delay'] + 10) # calculate response onset time for each trial in batch based on load
+    resp_onsets_exp = resp_onsets[:, None] # Expand resp_onsets: shape (batch, 1)
+    resp_offsets_exp = resp_onsets_exp + settings['stim_dur']
+    time_mask = tf.logical_and(
+        time_idx >= resp_onsets_exp,
+        time_idx < resp_offsets_exp
+    )  # shape: (batch, T)
+    # pdb.set_trace()
+    masked_out_max = tf.where(time_mask, out_2d, tf.fill(tf.shape(out_2d), -1e9)) # For max: mask out invalid with very small value
+    masked_out_min = tf.where(time_mask, out_2d, tf.fill(tf.shape(out_2d), 1e9)) # For min: mask out invalid with very large value
+
+    # Reduce over time
+    max_vals = tf.reduce_max(masked_out_max, axis=1)  # (batch,)
+    min_vals = tf.reduce_min(masked_out_min, axis=1)  # (batch,)
+
+    # --- correct mask shape ---
+    match_mask = tf.equal(labels, 1)  # (batch,)
+
+    # --- compute performance ---
+    perfs = tf.where(
+        match_mask,
+        tf.cast(max_vals > 0.7, tf.float32),
+        tf.cast(min_vals < -0.7, tf.float32)
+    )
+    
+    accuracy = tf.reduce_mean(perfs)
+    recall_errors = 1 - accuracy    
+    
     with tf.name_scope('PlotNodes'):
-        out_plot = tf.nn.softmax(out[:2], axis=-1)
+        out_plot = out[:2] # Plot the output of the first two trials in batch for visualization
+
 
 # Target regularization
 with tf.name_scope('RegularizationLoss'):
@@ -199,8 +266,11 @@ with tf.name_scope('OptimizationScheme'):
         learning_signal = learning_signal_classification + learning_signal_regularization
 
         # e-traces for input synapses
-        grad_in, e_trace, _, epsilon_a = cell.compute_loss_gradient(learning_signal, input_spikes, z, v, b,
+        # grad_in, e_trace, _, epsilon_a = cell.compute_loss_gradient(learning_signal, input_spikes, z, v, b,
+        #                                                             zero_on_diagonal=False, decay_out=decay)
+        grad_in, e_trace, _, epsilon_a = cell.compute_loss_gradient(learning_signal, inputs, z, v, b,
                                                                     zero_on_diagonal=False, decay_out=decay)
+        
         # e-traces for recurrent synapses
         z_previous_step = tf.concat([tf.zeros_like(z[:, 0])[:, None], z[:, :-1]], axis=1)
         grad_rec, _, _, _ = cell.compute_loss_gradient(learning_signal, z_previous_step, z, v, b,
@@ -268,13 +338,18 @@ results_tensors = {
     'regularization_coeff': regularization_coeff,
 }
 
-
-plot_result_tensors = {'input_spikes': input_spikes,
-                       'input_nums': input_nums,
+plot_result_tensors = {'input': inputs,
+                       'target': targets,
                        'z': z,
                        'thr': tf.constant(thr),
-                       'target_nums': target_nums,
                        }
+
+# plot_result_tensors = {'input_spikes': input_spikes,
+#                        'input_nums': input_nums,
+#                        'z': z,
+#                        'thr': tf.constant(thr),
+#                        'target_nums': target_nums,
+#                        }
 try:
     flag_dict = FLAGS.flag_values_dict()
 except:
@@ -294,7 +369,7 @@ for k_iter in range(FLAGS.n_iter):
     # Monitor the training with a validation set
     if np.mod(k_iter, FLAGS.validate_every) == 0:
         t0 = time()
-        val_dict = get_data_dict(FLAGS.n_batch)
+        val_dict = get_data_dict(FLAGS.n_batch, settings)
         results_values = sess.run(results_tensors, feed_dict=val_dict)
         validation_loss_list.append(results_values['loss_recall'])
         validation_error_list.append(results_values['recall_errors'])
@@ -330,10 +405,11 @@ for k_iter in range(FLAGS.n_iter):
             t_train, t_run,
             results_values['loss_recall'], results_values['loss_reg']
         ))
+        
 
         if FLAGS.do_plot:
             plot_result_tensors['out_plot'] = out_plot
-            plot_result_tensors['y_predict'] = y_predict
+            # plot_result_tensors['y_predict'] = y_predict
             plot_result_tensors['thr'] = FLAGS.thr + b * beta
             if FLAGS.eprop_impl == 'hardcoded':
                 plot_result_tensors['e_trace'] = e_trace
@@ -356,7 +432,7 @@ for k_iter in range(FLAGS.n_iter):
         early_stopping_list = []
         t_es_0 = time()
         for i in range(8):
-            val_dict = get_data_dict(FLAGS.n_batch)
+            val_dict = get_data_dict(FLAGS.n_batch, settings)
             early_stopping_list.append(sess.run(results_tensors['recall_errors'], feed_dict=val_dict))
         t_es = time() - t_es_0
         print("comput. time (s): early stopping: " + str(t_es))
@@ -373,7 +449,7 @@ for k_iter in range(FLAGS.n_iter):
         break
 
     # do train step
-    train_dict = get_data_dict(FLAGS.n_batch)
+    train_dict = get_data_dict(FLAGS.n_batch, settings)
     t0 = time()
     sess.run(train_step, feed_dict=train_dict)
     t_train = time() - t0
@@ -394,9 +470,12 @@ results = {
 # Save sample trajectory (input, output, etc. for plotting) and test final performance
 test_errors = []
 for i in range(4):
-    test_dict = get_data_dict(FLAGS.n_batch)
-    results_values, plot_results_values, in_spk, spk, target_nums_np = sess.run(
-        [results_tensors, plot_result_tensors, input_spikes, z, target_nums],
+    test_dict = get_data_dict(FLAGS.n_batch, settings)
+    # results_values, plot_results_values, in_spk, spk, target_nums_np = sess.run(
+    #     [results_tensors, plot_result_tensors, input_spikes, z, target_nums],
+    #     feed_dict=test_dict)
+    results_values, plot_results_values, in_spk, spk, target_np = sess.run(
+        [results_tensors, plot_result_tensors, inputs, z, targets],
         feed_dict=test_dict)
     test_errors.append(results_values['recall_errors'])
     flag_dict['n_regular'] = n_regular
@@ -413,7 +492,7 @@ print('''Statistics on the test set average error {:.2g} +- {:.2g} (averaged ove
 
 if FLAGS.save_outputs:
     eprop_tag = 'eprop_{}'.format('true' if FLAGS.eprop else 'false')
-    run_name = 'evidence_accumulation_{}_{}'.format(eprop_tag, start_time.strftime('%Y%m%d_%H%M%S'))
+    run_name = 'sternberg_{}_{}'.format(eprop_tag, start_time.strftime('%Y%m%d_%H%M%S'))
     run_dir = os.path.join(FLAGS.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
@@ -443,7 +522,7 @@ if FLAGS.save_outputs:
         'feedback': FLAGS.feedback,
         'f_regularization_type': FLAGS.f_regularization_type,
         't_cue_spacing': t_cue_spacing,
-        'input_f0': input_f0,
+        # 'input_f0': input_f0,
         'reg_rate_hz': FLAGS.reg_rate,
         'reg_f': FLAGS.reg_f,
         'checkpoint_prefix': os.path.join(run_dir, 'model.ckpt'),
