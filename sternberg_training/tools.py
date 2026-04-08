@@ -104,13 +104,19 @@ def generate_sternberg_task_data(batch_size, settings):
     targets = []
     loads = np.random.choice([1, 3], size=batch_size, p=[settings['p_low'], 1-settings['p_low']]) # pre-generate loads for all trials in batch
     labels = np.zeros(batch_size)
+    jitter_onsets = np.zeros(batch_size, dtype=np.int64)
+    jitter_delays = np.zeros(batch_size, dtype=np.int64)
     p_low = settings['p_low'] # probability of low load (1 item) vs high load (3 items)
     for b in range(batch_size):
         settings['load'] = loads[b]
         if settings['jitter_onset'] > 0 or settings['jitter_delay'] > 0:
             settings_jitter = settings.copy()
-            settings_jitter['stim_on'] = settings['stim_on'] + np.random.randint(-settings['jitter_onset'], settings['jitter_onset']+1)
-            settings_jitter['delay'] = settings['delay'] + np.random.randint(-settings['jitter_delay'], settings['jitter_delay']+1)
+            onset_jitter = np.random.randint(-settings['jitter_onset'], settings['jitter_onset']+1) if settings['jitter_onset'] > 0 else 0
+            delay_jitter = np.random.randint(-settings['jitter_delay'], settings['jitter_delay']+1) if settings['jitter_delay'] > 0 else 0
+            jitter_onsets[b] = onset_jitter
+            jitter_delays[b] = delay_jitter
+            settings_jitter['stim_on'] = settings['stim_on'] + onset_jitter
+            settings_jitter['delay'] = settings['delay'] + delay_jitter
             u, label = generate_input_stim_sternberg(settings_jitter)
             target = generate_target_continuous_sternberg(settings_jitter, label)
         else:
@@ -124,7 +130,7 @@ def generate_sternberg_task_data(batch_size, settings):
     # # output tf tensors
     # inputs = tf.convert_to_tensor(inputs, dtype=tf.float32)
     # targets = tf.convert_to_tensor(targets, dtype=tf.float32)
-    return inputs, targets, labels, loads
+    return inputs, targets, labels, loads, jitter_onsets, jitter_delays
 
 
 class NumpyAwareEncoder(json.JSONEncoder):

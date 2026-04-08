@@ -44,6 +44,11 @@ tf.app.flags.DEFINE_integer('n_ref', 5, 'Number of refractory steps [ms]')
 tf.app.flags.DEFINE_integer('dt', 1, 'Simulation time step [ms]')
 tf.app.flags.DEFINE_float('dampening_factor', 0.3, 'factor that controls amplitude of pseudoderivative')
 
+# task settings
+tf.app.flags.DEFINE_integer('delay', 10, 'Length of delay period in the Sternberg task')
+tf.app.flags.DEFINE_integer('jitter_onset', 0, 'Number of time steps to jitter the stimulus onset in each trial, sampled uniformly from [-jitter_onset, jitter_onset]')
+tf.app.flags.DEFINE_integer('jitter_delay', 0, 'Number of time steps to jitter the stimulus delay in each trial, sampled uniformly from [-jitter_delay, jitter_delay]')
+
 # other settings
 tf.app.flags.DEFINE_bool('do_plot', True, 'Perform plots')
 tf.app.flags.DEFINE_bool('device_placement', False, '')
@@ -75,8 +80,8 @@ regularization_f0 = FLAGS.reg_rate / 1000.  # mean target network firing frequen
 # Network parameters
 tau_v = FLAGS.tau_v
 thr = FLAGS.thr
-n_adaptive = 50
-n_regular = 50
+n_adaptive = 100 #50
+n_regular = 100 #50
 n_neurons = n_adaptive + n_regular
 decay = np.exp(-FLAGS.dt / FLAGS.tau_out)  # output layer filtered_z decay, chose value between 15 and 30ms as for tau_v
 
@@ -88,22 +93,36 @@ settings = {
         'T': 250, # trial duration (in steps)
         'stim_on': 50, # input stim onset (in steps)
         'stim_dur': 25, # input stim duration (in steps)
-        'delay': 200, # delay b/w sample and test (in steps)
+        'delay': FLAGS.delay, # delay b/w sample and test (in steps)
         # 'DeltaT': 1, # sampling rate
         # 'taus': args.decay_taus, # decay time-constants (in steps)
         # 'task': args.task.lower(), # task name
         'load': 1, # initialize with load 1, but will alternate with 3
         'p_low': 0.5, # probability of low load trial (load 1) vs high load trial (load 3)
-        'jitter_onset': 0,
-        'jitter_delay': 0,
+        'jitter_onset': FLAGS.jitter_onset,
+        'jitter_delay': FLAGS.jitter_delay,
         }
+
+def compute_min_trial_length(stim_on, stim_dur, delay, max_load=3):
+    # Need enough room for sample items, probe, response offset (+10), and full response window, then add extra 50.
+    return int(stim_on + (max_load + 2) * stim_dur + delay + 10 + 1 + 50)
+
+settings['T'] = np.amax([settings['T'], 
+                         compute_min_trial_length(settings['stim_on'], settings['stim_dur'], settings['delay'], max_load=3)])
 
 def get_data_dict(batch_size, settings):
         
     # used for obtaining a new randomly generated batch of examples
-    batch_inputs, batch_targets, batch_labels, batch_loads = generate_sternberg_task_data(batch_size=batch_size, settings=settings)
+    batch_inputs, batch_targets, batch_labels, batch_loads, batch_jitter_onsets, batch_jitter_delays = generate_sternberg_task_data(batch_size=batch_size, settings=settings)
     batch_inputs = np.transpose(batch_inputs, (0, 2, 1))  # (batch, T, channels)
-    return {inputs: batch_inputs, targets: batch_targets, labels: batch_labels, loads: batch_loads}
+    return {
+        inputs: batch_inputs,
+        targets: batch_targets,
+        labels: batch_labels,
+        loads: batch_loads,
+        jitter_onsets: batch_jitter_onsets,
+        jitter_delays: batch_jitter_delays,
+    }
 
     # seq_len = int(t_cue_spacing * 7 + 1200)
     # spk_data, in_nums, target_data, _ = \
@@ -118,6 +137,8 @@ inputs = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None, n_in), nam
 targets = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None), name='Targets')  # Target output placeholder
 labels = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch,), name='Labels') # Same/different label for each trial in batch
 loads = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch,), name='Loads') # Load (number of items to remember) for each trial in batch
+jitter_onsets = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch,), name='JitterOnsets') # Per-trial jitter for stim onset
+jitter_delays = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch,), name='JitterDelays') # Per-trial jitter for maintenance delay
 # input_spikes = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None, n_in),name='InputSpikes')  # MAIN input spike placeholder
 # input_nums = tf.placeholder(dtype=tf.float32, shape=(FLAGS.n_batch, None),name='InputSpikes')  # MAIN input spike placeholder
 # target_nums = tf.placeholder(dtype=tf.int64, shape=(FLAGS.n_batch, None),name='TargetNums')  # Lists of target characters of the recall task
@@ -161,7 +182,8 @@ with tf.name_scope('OutputComputation'):
             return logits, grad
 
         # generate random feedback matrix
-        b_out_vals = rd.randn(n_regular + n_adaptive, 2)
+        # b_out_vals = rd.randn(n_regular + n_adaptive, 2)
+        b_out_vals = rd.randn(n_regular + n_adaptive, 1)
         B_out = tf.constant(b_out_vals, dtype=tf.float32, name='feedback_weights')
         out = matmul_random_feedback(filtered_z, W_out, B_out)
     else:
@@ -191,8 +213,15 @@ with tf.name_scope('TaskLoss'):
     batch_size = tf.shape(out_2d)[0]
     
     time_idx = tf.range(T)[None, :] # Create time indices: shape (1, T)
-    resp_onsets = (settings['stim_on'] + loads * settings['stim_dur'] + \
-        settings['stim_dur'] + settings['delay'] + 10) # calculate response onset time for each trial in batch based on load
+    resp_onsets = (
+        settings['stim_on']
+        + jitter_onsets
+        + loads * settings['stim_dur']
+        + settings['stim_dur']
+        + settings['delay']
+        + jitter_delays
+        + 10
+    ) # calculate response onset time for each trial in batch based on load and sampled jitter
     resp_onsets_exp = resp_onsets[:, None] # Expand resp_onsets: shape (batch, 1)
     resp_offsets_exp = resp_onsets_exp + settings['stim_dur']
     time_mask = tf.logical_and(
@@ -492,7 +521,7 @@ print('''Statistics on the test set average error {:.2g} +- {:.2g} (averaged ove
 
 if FLAGS.save_outputs:
     eprop_tag = 'eprop_{}'.format('true' if FLAGS.eprop else 'false')
-    run_name = 'sternberg_{}_{}'.format(eprop_tag, start_time.strftime('%Y%m%d_%H%M%S'))
+    run_name = 'sternberg_{}_delay{}_jitter_{}_{}_{}'.format(eprop_tag, FLAGS.delay, FLAGS.jitter_onset, FLAGS.jitter_delay, start_time.strftime('%Y%m%d_%H%M%S'))
     run_dir = os.path.join(FLAGS.output_dir, run_name)
     os.makedirs(run_dir, exist_ok=True)
 
@@ -516,12 +545,14 @@ if FLAGS.save_outputs:
         'thr': FLAGS.thr,
         'dt': FLAGS.dt,
         'n_ref': FLAGS.n_ref,
+        'jitter_onset': FLAGS.jitter_onset,
+        'jitter_delay': FLAGS.jitter_delay,
         'dampening_factor': FLAGS.dampening_factor,
         'eprop': FLAGS.eprop,
         'eprop_impl': FLAGS.eprop_impl,
         'feedback': FLAGS.feedback,
         'f_regularization_type': FLAGS.f_regularization_type,
-        't_cue_spacing': t_cue_spacing,
+        # 't_cue_spacing': t_cue_spacing,
         # 'input_f0': input_f0,
         'reg_rate_hz': FLAGS.reg_rate,
         'reg_f': FLAGS.reg_f,

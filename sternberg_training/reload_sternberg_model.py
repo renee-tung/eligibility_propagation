@@ -22,15 +22,17 @@ def load_model_spec(path):
 def get_data_dict(
     batch_size,
     settings,
-    inputs, targets, labels, loads
+    inputs, targets, labels, loads, jitter_onsets, jitter_delays
 ):
     # used for obtaining a new randomly generated batch of examples
-    batch_inputs, batch_targets, batch_labels, batch_loads = generate_sternberg_task_data(batch_size=batch_size, settings=settings)
+    batch_inputs, batch_targets, batch_labels, batch_loads, batch_jitter_onsets, batch_jitter_delays = generate_sternberg_task_data(batch_size=batch_size, settings=settings)
     batch_inputs = np.transpose(batch_inputs, (0, 2, 1))  # (batch, T, channels)
     return {inputs: batch_inputs, 
             targets: batch_targets, 
             labels: batch_labels, 
-            loads: batch_loads}
+            loads: batch_loads,
+            jitter_onsets: batch_jitter_onsets,
+            jitter_delays: batch_jitter_delays}
 
 def get_trial_scenarios(spec):
     """
@@ -59,6 +61,18 @@ def get_trial_scenarios(spec):
                          'stim_on': 50, # input stim onset (in steps)
                          'stim_dur': 25, # input stim duration (in steps)
                          'delay': 50, # delay b/w sample and test (in steps)
+                         'load': 1, # initialize with load 1, but will alternate with 3
+                         'p_low': 0.5, # probability of low load trial (load 1) vs high load trial (load 3)
+                        'jitter_onset': 0,
+                        'jitter_delay': 0,
+                        }
+        },
+        {
+            'name': 'delay100',
+            'settings': {'T': 350, # trial duration (in steps)
+                         'stim_on': 50, # input stim onset (in steps)
+                         'stim_dur': 25, # input stim duration (in steps)
+                         'delay': 100, # delay b/w sample and test (in steps)
                          'load': 1, # initialize with load 1, but will alternate with 3
                          'p_low': 0.5, # probability of low load trial (load 1) vs high load trial (load 3)
                         'jitter_onset': 0,
@@ -186,6 +200,8 @@ def build_graph(spec, settings, batch_size=None):
     targets = tf.placeholder(dtype=tf.float32, shape=(batch_size, None), name='Targets')  # Target output placeholder
     labels = tf.placeholder(dtype=tf.int64, shape=(batch_size,), name='Labels') # Same/different label for each trial in batch
     loads = tf.placeholder(dtype=tf.int64, shape=(batch_size,), name='Loads') # Load (number of items to remember) for each trial in batch
+    jitter_onsets = tf.placeholder(dtype=tf.int64, shape=(batch_size,), name='JitterOnsets')
+    jitter_delays = tf.placeholder(dtype=tf.int64, shape=(batch_size,), name='JitterDelays')
     # input_spikes = tf.placeholder(dtype=tf.float32, shape=(None, None, n_in), name='InputSpikes')
     # input_nums = tf.placeholder(dtype=tf.float32, shape=(None, None), name='InputNums')
     # target_nums = tf.placeholder(dtype=tf.int64, shape=(None, None), name='TargetNums')
@@ -222,14 +238,19 @@ def build_graph(spec, settings, batch_size=None):
         # output_logits = out[:, -t_cue_spacing:]
 
     out_2d = tf.squeeze(out, axis=-1)
-    resp_onsets = (settings['stim_on'] + loads * settings['stim_dur'] + \
-        settings['stim_dur'] + settings['delay'] + 10) # calculate response onset time for each trial in batch based on load
+    resp_onsets = (
+        settings['stim_on']
+        + jitter_onsets
+        + loads * settings['stim_dur']
+        + settings['stim_dur']
+        + settings['delay']
+        + jitter_delays
+        + 10
+    ) # calculate response onset time for each trial in batch based on load and sampled jitter
     T = tf.shape(out_2d, out_type=tf.int64)[1]
     batch_size = tf.shape(out_2d)[0]
     
     time_idx = tf.range(T)[None, :] # Create time indices: shape (1, T)
-    resp_onsets = (settings['stim_on'] + loads * settings['stim_dur'] + \
-        settings['stim_dur'] + settings['delay'] + 10) # calculate response onset time for each trial in batch based on load
     resp_onsets_exp = resp_onsets[:, None] # Expand resp_onsets: shape (batch, 1)
     resp_offsets_exp = resp_onsets_exp + settings['stim_dur']
     time_mask = tf.logical_and(
@@ -267,6 +288,8 @@ def build_graph(spec, settings, batch_size=None):
         'targets': targets,
         'loads': loads,
         'labels': labels,
+        'jitter_onsets': jitter_onsets,
+        'jitter_delays': jitter_delays,
         'z': z,
         'outs': out_2d,
         'accuracy': accuracy,
@@ -328,6 +351,8 @@ def main():
                     targets=ep['targets'],
                     labels=ep['labels'],
                     loads=ep['loads'],
+                    jitter_onsets=ep['jitter_onsets'],
+                    jitter_delays=ep['jitter_delays'],
                     settings=scenario['settings'],
                     # input_spikes_ph=ep['input_spikes'],
                     # input_nums_ph=ep['input_nums'],
