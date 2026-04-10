@@ -80,8 +80,8 @@ regularization_f0 = FLAGS.reg_rate / 1000.  # mean target network firing frequen
 # Network parameters
 tau_v = FLAGS.tau_v
 thr = FLAGS.thr
-n_adaptive = 100 #50
-n_regular = 100 #50
+n_adaptive = 250 #50
+n_regular = 250 #50
 n_neurons = n_adaptive + n_regular
 decay = np.exp(-FLAGS.dt / FLAGS.tau_out)  # output layer filtered_z decay, chose value between 15 and 30ms as for tau_v
 
